@@ -1,14 +1,18 @@
-const { Client, LocalAuth } = require("whatsapp-web.js");
-//axios
+const { Client, NoAuth } = require("whatsapp-web.js"); // CHANGE 1: We are not using LocalAuth anymore
 const axios = require("axios");
-
 const qrcode = require("qrcode-terminal");
 
+// CHANGE 2: We use NoAuth for cloud environments where we can't save files easily.
+// This means you will scan a QR code from the logs each time the app restarts.
 const client = new Client({
-  authStrategy: new LocalAuth(),
+  authStrategy: new NoAuth(),
+  puppeteer: {
+		args: ['--no-sandbox'],
+	}
 });
 
 client.on("qr", (qr) => {
+  // This will print the QR code in your Railway logs
   qrcode.generate(qr, { small: true });
 });
 
@@ -17,41 +21,41 @@ client.on("ready", () => {
 });
 
 client.on("message_create", async (msg) => {
-  console.log("MESSAGE RECEIVED", msg, msg.from, msg.to, msg.body, msg.author);
+  console.log("MESSAGE RECEIVED", msg.from, msg.to, msg.body);
 
-  // Ignore messages sent by me to myself no.  
+  // Ignore messages sent by you
   if (msg.id.fromMe) {
-    console.log("Ignore : Message sent by me");
+    console.log("Ignore: Message sent by me");
     return;
   }
 
-  // Add your whitelisted whatsapp numbers - Bot will be activated to those numbers only
-  let white_list_responders = ["919423177880@c.us", "917057758867@c.us"];
+  // Your whitelisted numbers
+  let white_list_responders = ["919423177880@c.us", "917057758867@c.us","923424153171@c.us","923316156896@c.us"];
 
-  // if msg.from contains @g.us - its from group , else its from contact
   if (msg.from.includes("@g.us")) {
     console.log("Group message");
-    //check if the message is from a white listed user //mentionedIds
     let mentionedIds = msg.mentionedIds;
     console.log("Mentioned Ids", mentionedIds);
-    //if mentioned ids are present in the white list then respond
+
     let is_white_listed = false;
     if (mentionedIds) {
       mentionedIds.forEach((id) => {
-        if (white_list_responders.includes(id) && white_list_responders.includes(msg.from)) {
+        // Simple check if any mentioned user is in the whitelist
+        if (white_list_responders.includes(id)) {
           is_white_listed = true;
-          respond_to_message(msg);
         }
       });
-    } 
+    }
+    if (is_white_listed) {
+        respond_to_message(msg);
+    }
+
   } else {
     console.log("Personal message");
-    //check if the message is from a white listed user
+    // Check if the message is from a whitelisted user
     if (white_list_responders.includes(msg.from)) {
       console.log("White listed user");
-      //send a message to the user
       respond_to_message(msg);
-      //client.sendMessage(msg.from, 'This is a response from n8n');
     } else {
       console.log("Not a white listed user");
     }
@@ -60,24 +64,42 @@ client.on("message_create", async (msg) => {
 
 client.initialize();
 
-//Message respond using n8n
-respond_to_message = async (msg) => {
-  // msg.reply('pong');
+// This function now uses an environment variable for the webhook URL
+const respond_to_message = async (msg) => {
+  // The webhook URL is now loaded from the environment variables
+  const webhookUrl = process.env.N8N_WEBHOOK_URL;
 
-  //http://localhost:5678/webhook/custom_wa_bot
-  //cal this api {msg:msg.body}
-  //get the response and send it back to the user
+  if (!webhookUrl) {
+      console.error("ERROR: N8N_WEBHOOK_URL environment variable not set!");
+      return;
+  }
+
   if (msg.body) {
-    let data = { msg: msg.body, from: msg.from, from_name: msg._data.notifyName };
-    console.log("Data to n8n", data);
-    let response = await axios.post("http://localhost:5678/webhook/custom_wa_bot", data);
-    console.log("Response from n8n", response.data.output);
-    if (response.data.output) {
-      msg.reply(response.data.output);
-    } else {
-      console.log("No response from n8n");
+    let data = {
+      msg: msg.body,
+      from: msg.from,
+      from_name: msg._data.notifyName,
+    };
+    console.log("Sending data to n8n:", data);
+    try {
+      // CHANGE 3: Use the webhookUrl variable instead of a hardcoded localhost URL
+      let response = await axios.post(webhookUrl, data);
+      
+      console.log("Received response from n8n:", response.data);
+
+      // n8n's "Respond to Webhook" node often nests the data.
+      // We check for common output structures.
+      const output = response.data.output || (response.data[0] && response.data[0].json ? response.data[0].json.output : null);
+
+      if (output) {
+        msg.reply(output);
+      } else {
+        console.log("No 'output' field found in n8n response.");
+      }
+    } catch (error) {
+        console.error("Error calling n8n webhook:", error.message);
     }
   } else {
-    console.log("No message body");
+    console.log("No message body to process.");
   }
 };
